@@ -7,40 +7,36 @@
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
 
 mod consensus;
-mod constants;
-mod origin;
 mod staking;
-mod types;
 mod validators;
 pub mod voter_bags;
-mod weights;
 pub mod xcm_config;
-mod collective;
+mod primitives;
+pub mod collective;
+mod local;
 
-pub use consensus::*;
-pub use constants::*;
-pub use collective::*;
+use collective::*;
+pub use primitives::{constants::*, origin::*, types::*};
 use cumulus_pallet_parachain_system::RelayNumberStrictlyIncreases;
 pub use frame_election_provider_support::{
-	onchain, BalancingConfig, ElectionDataProvider, SequentialPhragmen, VoteWeight,
+	BalancingConfig, ElectionDataProvider, onchain, SequentialPhragmen, VoteWeight,
 };
 use frame_support::{
 	construct_runtime,
 	dispatch::DispatchClass,
+	PalletId,
 	parameter_types,
 	traits::{ConstU16, ConstU32, EitherOfDiverse, Everything, OnInitialize, U128CurrencyToVote},
 	weights::{
-		constants::WEIGHT_PER_SECOND, ConstantMultiplier, Weight, WeightToFeeCoefficient,
+		ConstantMultiplier, constants::WEIGHT_PER_SECOND, Weight, WeightToFeeCoefficient,
 		WeightToFeeCoefficients, WeightToFeePolynomial,
 	},
-	PalletId,
 };
 use frame_system::{
-	limits::{BlockLength, BlockWeights},
 	EnsureRoot,
+	limits::{BlockLength, BlockWeights},
 };
 use nimbus_primitives::NimbusId;
-pub use origin::*;
 use pallet_session::historical::{self as pallet_session_historical};
 #[cfg(any(feature = "std", test))]
 pub use pallet_staking::StakerStatus;
@@ -51,25 +47,23 @@ use sp_core::{crypto::KeyTypeId, OpaqueMetadata};
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
 pub use sp_runtime::{
+	ApplyExtrinsicResult,
 	create_runtime_str,
-	curve::PiecewiseLinear,
-	generic, impl_opaque_keys,
-	traits::{AccountIdLookup, BlakeTwo256, Block as BlockT, Get, IdentifyAccount, Verify},
-	transaction_validity::{TransactionPriority, TransactionSource, TransactionValidity},
-	ApplyExtrinsicResult, FixedU128, MultiAddress, MultiSignature, Perbill, Percent, Permill,
+	curve::PiecewiseLinear, FixedU128,
+	generic,
+	impl_opaque_keys,
+	MultiAddress, MultiSignature, Perbill, Percent, Permill, traits::{AccountIdLookup, BlakeTwo256, Block as BlockT, Get, IdentifyAccount, Verify}, transaction_validity::{TransactionPriority, TransactionSource, TransactionValidity},
 };
 use sp_std::prelude::*;
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
 pub use staking::*;
-pub use types::*;
 use xcm_config::{XcmConfig, XcmOriginToTransactDispatchOrigin};
 // Polkadot imports
 use polkadot_runtime_common::{BlockHashCount, SlowAdjustingFeeUpdate};
-use weights::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight};
+use primitives::weights::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight};
 // XCM Imports
-use xcm::latest::prelude::BodyId;
 use xcm_executor::XcmExecutor;
 
 #[sp_version::runtime_version]
@@ -99,22 +93,24 @@ construct_runtime!(
 		Timestamp: pallet_timestamp::{Pallet, Call, Storage, Inherent} = 2,
 		ParachainInfo: parachain_info::{Pallet, Storage, Config} = 3,
 		RandomnessCollectiveFlip: pallet_randomness_collective_flip::{Pallet, Storage} = 4,
+		Session: pallet_session::{Pallet, Call, Storage, Event, Config<T>} = 5,
+		Historical: pallet_session_historical::{Pallet} = 6,
 
 		// Monetary stuff.
 		Balances: pallet_balances::{Pallet, Call, Storage, Config<T>, Event<T>} = 10,
 		TransactionPayment: pallet_transaction_payment::{Pallet, Storage, Event<T>} = 11,
 		Treasury: pallet_treasury = 12,
 
-		// nimbus support
-		AuthorInherent: pallet_author_inherent::{Pallet, Call, Storage, Inherent} = 23,
-		AuthorFilter: pallet_author_slot_filter::{Pallet, Storage, Event, Config} = 24,
-		Validators: validators::{Pallet, Storage, Config<T>} = 25,
-
 		// XCM helpers.
-		XcmpQueue: cumulus_pallet_xcmp_queue::{Pallet, Call, Storage, Event<T>} = 30,
-		PolkadotXcm: pallet_xcm::{Pallet, Call, Event<T>, Origin, Config} = 31,
-		CumulusXcm: cumulus_pallet_xcm::{Pallet, Event<T>, Origin} = 32,
-		DmpQueue: cumulus_pallet_dmp_queue::{Pallet, Call, Storage, Event<T>} = 33,
+		XcmpQueue: cumulus_pallet_xcmp_queue::{Pallet, Call, Storage, Event<T>} = 20,
+		PolkadotXcm: pallet_xcm::{Pallet, Call, Event<T>, Origin, Config} = 21,
+		CumulusXcm: cumulus_pallet_xcm::{Pallet, Event<T>, Origin} = 22,
+		DmpQueue: cumulus_pallet_dmp_queue::{Pallet, Call, Storage, Event<T>} = 23,
+
+		// consensus
+		AuthorInherent: pallet_author_inherent::{Pallet, Call, Storage, Inherent} = 30,
+		AuthorFilter: pallet_author_slot_filter::{Pallet, Storage, Event, Config} = 31,
+		Validators: validators::{Pallet, Storage, Config<T>} = 32,
 
 		// collective
 		Council: pallet_collective::<Instance1> = 41,
@@ -126,9 +122,8 @@ construct_runtime!(
 		VoterList: pallet_bags_list::<Instance1> = 54,
 		NominationPools: pallet_nomination_pools = 55,
 
-		// session
-		Session: pallet_session::{Pallet, Call, Storage, Event, Config<T>} = 61,
-		Historical: pallet_session_historical::{Pallet} = 62,
+		// local
+		TemplateModule: pallet_template = 60,
 	}
 );
 
@@ -253,13 +248,13 @@ parameter_types! {
 
 parameter_types! {
 	pub const ProposalBond: Permill = Permill::from_percent(5);
-	pub const ProposalBondMinimum: Balance = 1 * UNIT;
-	pub const SpendPeriod: BlockNumber = 1 * DAYS;
+	pub const ProposalBondMinimum: Balance = UNIT;
+	pub const SpendPeriod: BlockNumber = DAYS;
 	pub const Burn: Permill = Permill::from_percent(50);
-	pub const TipCountdown: BlockNumber = 1 * DAYS;
+	pub const TipCountdown: BlockNumber = DAYS;
 	pub const TipFindersFee: Percent = Percent::from_percent(20);
-	pub const TipReportDepositBase: Balance = 1 * UNIT;
-	pub const DataDepositPerByte: Balance = 1 * MILLIUNIT;
+	pub const TipReportDepositBase: Balance = UNIT;
+	pub const DataDepositPerByte: Balance = MILLIUNIT;
 	pub const TreasuryPalletId: PalletId = PalletId(*b"py/trsry");
 	pub const MaximumReasonLength: u32 = 300;
 	pub const MaxApprovals: u32 = 100;
